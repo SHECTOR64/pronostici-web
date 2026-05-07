@@ -28,12 +28,12 @@ def calcola():
 
         # DALLA RIGA 4 IN POI (Indice 2): Utenti
         df_utenti = df.iloc[2:].copy()
-        df_utenti = df_utenti.dropna(subset=['IL MIO NICK'])
+        df_utenti = df_utenti.dropna(subset=['il tuo nick'])
 
         classifica = []
 
         for _, row in df_utenti.iterrows():
-            nome = row['IL MIO NICK']
+            nome = row['il tuo nick']
             punti_totali = 0
             bonus_presi = 0
 
