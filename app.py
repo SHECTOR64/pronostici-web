@@ -16,37 +16,39 @@ def calcola():
     try:
         file_path = "PRONOSTICIINCORSO.xlsx"
         
-        # 1. Leggiamo tutto partendo dalla RIGA 1 (quella viola con P1_RIS)
+        # Carichiamo tutto: la Riga 1 (viola) è l'header (indice 0)
         df = pd.read_excel(file_path, sheet_name="TUTTOQUI", header=0)
         
-        # Pulizia nomi colonne (P1_RIS, IL TUO NICK, etc.)
+        # Pulizia nomi colonne
         df.columns = [str(c).strip().upper() for c in df.columns]
 
-        # 2. RISULTATI REALI: Sono nella prima riga di dati (Riga 2 dell'Excel)
-        # In pandas, dopo aver impostato header=0, la riga 2 dell'Excel è l'indice 0
+        # RISULTATI REALI: Sono nella Riga 2 dell'Excel (Indice 0 del DataFrame)
         ris_reali = df.iloc[0]
 
-        # 3. UTENTI: Iniziano dopo la riga dei risultati e la riga delle intestazioni secondarie
-        # Se i nomi iniziano alla riga 4 dell'Excel, dobbiamo saltare le prime 2 righe di dati
+        # UTENTI: Partono dalla RIGA 4 dell'Excel.
+        # In Pandas, avendo usato la riga 1 come header:
+        # Riga 2 dell'Excel = Indice 0
+        # Riga 3 dell'Excel = Indice 1
+        # Riga 4 dell'Excel = Indice 2 (Ecco dove partono gli utenti!)
         df_utenti = df.iloc[2:].copy()
         
-        # Cerchiamo la colonna del nome (gestendo i due modi in cui l'hai chiamata)
-        col_nome = None
-        for c in ['IL TUO NICK', 'IL MIO NICK']:
-            if c in df_utenti.columns:
-                col_nome = c
-                break
-        
-        if not col_nome:
-            st.error("Non trovo la colonna 'il tuo nick'. Controlla la cella A3.")
+        col_nome = 'IL TUO NICK'
+        if col_nome not in df_utenti.columns:
+            st.error(f"Errore: Non trovo '{col_nome}' in A1. Controlla il nome della cella viola.")
             return
 
+        # Pulizia: togliamo righe dove il nick è vuoto
         df_utenti = df_utenti.dropna(subset=[col_nome])
 
         classifica = []
 
         for _, row in df_utenti.iterrows():
             nome = row[col_nome]
+            
+            # Saltiamo eventuali righe di intestazione ripetute o vuote
+            if "RISULTATI" in str(nome).upper() or pd.isna(nome):
+                continue
+                
             punti_totali = 0
             bonus_presi = 0
 
@@ -56,18 +58,18 @@ def calcola():
 
                 if col_ris not in df.columns: continue
 
-                # Risultato Reale (Riga 2)
                 r_str = str(ris_reali[col_ris])
+                # Se non c'è il trattino nella riga 2, la partita non è finita
                 if "-" not in r_str: continue
 
                 try:
-                    # Analisi Risultato Reale
+                    # Analisi Risultato Reale (Riga 2)
                     g_casa_r, g_ospite_r = map(int, r_str.split('-'))
                     segno_r = "1" if g_casa_r > g_ospite_r else "2" if g_ospite_r > g_casa_r else "X"
                     u_ov_r = "U" if (g_casa_r + g_ospite_r) < 2.5 else "OV"
                     g_ng_r = "G" if (g_casa_r > 0 and g_ospite_r > 0) else "NG"
 
-                    # Pronostico Utente
+                    # Pronostico utente (Riga 4+)
                     prono_u_str = str(row[col_ris])
                     prono_match = re.search(r'(\d+-\d+)', prono_u_str)
                     if not prono_match: continue
@@ -75,19 +77,19 @@ def calcola():
                     g_casa_p, g_ospite_p = map(int, prono_match.group(1).split('-'))
                     segno_p = "1" if g_casa_p > g_ospite_p else "2" if g_ospite_p > g_casa_p else "X"
 
-                    # Punti Segno (3 punti fissi se indovina 1X2)
+                    # 1. Punti Segno (Indovinato 1X2) -> 3 punti fissi
                     if segno_p == segno_r:
                         punti_totali += 3.0
 
-                    # Risultato Esatto (Quota tra parentesi)
+                    # 2. Risultato Esatto (Quota tra parentesi nel pronostico utente)
                     if g_casa_p == g_casa_r and g_ospite_p == g_ospite_r:
                         quota_re = estrai_valore(prono_u_str)
-                        # Jolly Partita (raddoppia)
+                        # Jolly Partita (raddoppia la quota del risultato esatto)
                         if 'JOLLY_PARTITA' in row and str(row['JOLLY_PARTITA']) == str(i):
                             quota_re *= 2
                         punti_totali += quota_re
 
-                    # Bonus (G/NG, U/O)
+                    # 3. Bonus Colonna (G/NG, U/O)
                     if col_bonus in row:
                         bonus_u = str(row[col_bonus]).upper().strip()
                         if bonus_u in [segno_r, u_ov_r, g_ng_r]:
@@ -95,21 +97,30 @@ def calcola():
                 except:
                     continue
 
-            # Bonus Scala
-            punti_totali += {5:5, 6:10, 7:15, 8:25, 9:35, 10:50}.get(bonus_presi, 0)
+            # Bonus Scala per segni bonus indovinati
+            bonus_scala = {5:5, 6:10, 7:15, 8:25, 9:35, 10:50}.get(bonus_presi, 0)
+            punti_totali += bonus_scala
             
-            # Jolly Turno %
+            # Jolly Turno % (Es. se l'utente ha 10, aumenta del 10%)
             j_perc = estrai_valore(row.get('JOLLY_TURNO_PERC', 0)) / 100
             punti_finali = punti_totali * (1 + j_perc)
 
-            classifica.append({"Utente": nome, "Punti": round(punti_finali, 2), "Bonus": bonus_presi})
+            classifica.append({
+                "Utente": nome, 
+                "Punti": round(punti_finali, 2), 
+                "Bonus Indovinati": bonus_presi
+            })
 
-        res_df = pd.DataFrame(classifica).sort_values(by="Punti", ascending=False)
-        res_df.insert(0, 'Pos', range(1, len(res_df) + 1))
-        st.table(res_df.set_index('Pos'))
+        # Mostra la tabella
+        if classifica:
+            res_df = pd.DataFrame(classifica).sort_values(by="Punti", ascending=False)
+            res_df.insert(0, 'Pos', range(1, len(res_df) + 1))
+            st.table(res_df.set_index('Pos'))
+        else:
+            st.info("In attesa di dati validi... Controlla che i giocatori inizino dalla riga 4.")
 
     except Exception as e:
-        st.error(f"Errore: {e}")
+        st.error(f"Errore tecnico: {e}")
 
 if __name__ == "__main__":
     calcola()
