@@ -5,6 +5,7 @@ import re
 st.set_page_config(page_title="Classifica Pro Pronostici", layout="wide")
 
 def estrai_q(cella):
+    """Estrae numeri da celle come '2,50' o '2.50' o '2-1 (10.00)'"""
     if pd.isna(cella): return 0.0
     m = re.search(r"(\d+[\.,]\d+)", str(cella))
     if m: return float(m.group(1).replace(',', '.'))
@@ -12,123 +13,100 @@ def estrai_q(cella):
 
 def calcola():
     try:
-        file = "PRONOSTICIINCORSO.xlsx"
-        df_q = pd.read_excel(file, sheet_name="QUOTE", header=0)
-        df_p = pd.read_excel(file, sheet_name="TUTTOQUI", header=0)
-        
-        df_q.columns = [str(c).strip().upper() for c in df_q.columns]
-        df_p.columns = [str(c).strip().upper() for c in df_p.columns]
+        file_path = "PRONOSTICIINCORSO.xlsx"
+        # Carichiamo i due fogli
+        df_q = pd.read_excel(file_path, sheet_name="QUOTE")
+        # Carichiamo TUTTOQUI senza header per gestire le righe a mano
+        df_p = pd.read_excel(file_path, sheet_name="TUTTOQUI", header=None)
 
-        # 1. ANALISI GIORNATA (Risultati Reali in riga 2 di TUTTOQUI)
-        ris_reali_row = df_p.iloc[0]
-        partite_info = {}
-        max_gol, min_gol = -1, 99
-        p_piu_gol, p_meno_gol = [], []
-
+        # --- 1. IDENTIFICAZIONE RISULTATI REALI (RIGA 2) ---
+        # Partiamo dal presupposto che i risultati reali siano nella riga 2, colonne B, C, D...
+        ris_reali = {}
         for i in range(1, 11):
-            res = str(ris_reali_row.get(f'P{i}_RIS', ""))
-            if "-" in res:
-                gc, go = map(int, res.split('-'))
-                tot = gc + go
-                partite_info[i] = {'gc': gc, 'go': go, 'tot': tot, 'res': res}
-                if tot > max_gol: max_gol = tot
-                if tot < min_gol: min_gol = tot
+            val = str(df_p.iloc[1, i]) # Riga 2, colonne dalla 2 in poi
+            if "-" in val:
+                gc, go = map(int, val.split("-"))
+                ris_reali[i] = {"res": val, "gc": gc, "go": go}
 
-        for i, info in partite_info.items():
-            if info['tot'] == max_gol: p_piu_gol.append(i)
-            if info['tot'] == min_gol: p_meno_gol.append(i)
+        if not ris_reali:
+            st.warning("Inserisci i risultati reali nella riga 2 del foglio TUTTOQUI (es. 2-0 nella colonna B2)")
+            return
 
-        # Partita +Difficile (da colonna G del foglio QUOTE riga 1)
-        p_difficile = int(df_q.iloc[0].get('G', 0))
+        # --- 2. LOGICA PARTITA +GOL / -GOL ---
+        max_g = max(info['gc'] + info['go'] for info in ris_reali.values())
+        min_g = min(info['gc'] + info['go'] for info in ris_reali.values())
+        p_piu_gol = [i for i, info in ris_reali.items() if (info['gc'] + info['go']) == max_g]
+        p_meno_gol = [i for i, info in ris_reali.items() if (info['gc'] + info['go']) == min_g]
 
-        # 2. CALCOLO UTENTI (da riga 4)
+        # --- 3. CALCOLO UTENTI (DA RIGA 4) ---
         classifica = []
-        for _, row in df_p.iloc[2:].iterrows():
-            u = str(row.get('IL TUO NICK', ""))
-            if u == "" or "RISULTATI" in u.upper(): continue
+        # La riga 4 è l'indice 3 in Python
+        for idx in range(3, len(df_p)):
+            row = df_p.iloc[idx]
+            utente = str(row[0]) # Colonna A: Nickname
+            if utente == "nan" or "RISULTATI" in utente.upper(): continue
 
-            p = {k: 0.0 for k in ['ESATTO', 'SEGNI', 'GOL_C', 'GOL_O', 'BONUS_S', 'SPECIALI', 'EXTRA']}
-            bonus_centrati_count = 0
-            segni_centrati_count = 0
-            piu_gol_centrata = False
-            meno_gol_centrata = False
+            # Inizializziamo i contatori per le categorie richieste
+            dati = {
+                "ESATTO": 0.0, "SEGNI": 0.0, "GOL_C": 0.0, "GOL_O": 0.0, 
+                "BONUS_S": 0.0, "SPECIALI": 0.0, "EXTRA": 0.0
+            }
+            num_segni, num_bonus = 0, 0
+            piu_g_presa, meno_g_presa = False, False
 
             for i in range(1, 11):
-                if i not in partite_info: continue
-                info = partite_info[i]
-                q_riga = df_q.iloc[i-1] # Riga corrispondente alla partita
+                if i not in ris_reali: continue
+                info_r = ris_reali[i]
                 
-                # Pronostico Utente
-                prono_u = str(row.get(f'P{i}_RIS', ""))
-                if "-" not in prono_u: continue
-                gc_u, go_u = map(int, re.search(r"(\d+)-(\d+)", prono_u).groups())
-                
-                # Analisi Segni
-                s_r = "1" if info['gc'] > info['go'] else ("2" if info['go'] > info['gc'] else "X")
-                s_u = "1" if gc_u > go_u else ("2" if go_u > gc_u else "X")
-                
-                # A. RISULTATO ESATTO vs GOL CASA/OSPITE
-                if gc_u == info['gc'] and go_u == info['go']:
-                    quota_esatto = q_riga.get(info['res'], 0)
-                    quota_segno = q_riga.get(s_r, 0)
-                    valore = quota_esatto + quota_segno
+                # Pronostico utente (Colonna corrispondente alla partita)
+                prono_u = str(row[i])
+                m_u = re.search(r"(\d+)-(\d+)", prono_u)
+                if not m_u: continue
+                gc_u, go_u = map(int, m_u.groups())
+
+                # Quote dal foglio QUOTE (Riga i-1 perché header=0)
+                q_riga = df_q.iloc[i-1]
+                segno_r = "1" if info_r['gc'] > info_r['go'] else ("2" if info_r['go'] > info_r['gc'] else "X")
+                segno_u = "1" if gc_u > go_u else ("2" if go_u > gc_u else "X")
+
+                # REGOLE PUNTI
+                # Se Risultato Esatto: prendi Esatto + Segno (CASA/X/COSA)
+                if gc_u == info_r['gc'] and go_u == info_r['go']:
+                    val_esatto = estrai_q(q_riga.get(info_r['res'], 0))
+                    val_segno = estrai_q(q_riga.get(segno_r, 0))
+                    punti_match = val_esatto + val_segno
                     
-                    # Jolly o Difficile?
-                    if str(row.get('JOLLY_PARTITA')) == str(i) or i == p_difficile:
-                        valore *= 2
+                    # Jolly o +Difficile (Colonna G del foglio Quote indica la partita +Difficile)
+                    p_difficile = int(df_q.columns[6]) if str(df_q.columns[6]).isdigit() else 99
+                    if i == p_difficile: punti_match *= 2
                     
-                    p['ESATTO'] += valore
-                    p['SEGNI'] += quota_segno
+                    dati["ESATTO"] += punti_match
+                    num_segni += 1
                 else:
-                    # Se non prende l'esatto, verifichiamo i singoli gol
-                    if s_u == s_r: 
-                        p['SEGNI'] += q_riga.get(s_r, 0)
-                        segni_centrati_count += 1
-                    if gc_u == info['gc']: p['GOL_C'] += q_riga.get(f'GC{gc_u}', 0)
-                    if go_u == info['go']: p['GOL_O'] += q_riga.get(f'GO{go_u}', 0)
+                    # Se non prendi l'esatto, verifichiamo segno e gol singoli
+                    if segno_u == segno_r: 
+                        dati["SEGNI"] += estrai_q(q_riga.get(segno_r, 0))
+                        num_segni += 1
+                    if gc_u == info_r['gc']: dati["GOL_C"] += estrai_q(q_riga.get(f"GC{gc_u}", 0))
+                    if go_u == info_r['go']: dati["GOL_O"] += estrai_q(q_riga.get(f"GO{go_u}", 0))
 
-                # B. BONUS SEGNI (TUTTO O NIENTE)
-                # Qui servirebbe una logica per verificare se TUTTI i bonus giocati sono ok
-                # Per ora implementiamo la verifica del singolo bonus colonna
-                bon_u = str(row.get(f'P{i}_BONUS', "")).upper()
-                esito_g = "G" if info['gc']>0 and info['go']>0 else "NG"
-                esito_uo = "OV" if info['tot']>2.5 else "U"
+                # BONUS G/NG U/OV (Supponiamo siano nelle colonne successive dell'utente)
+                # Qui aggiungeremo la logica per le tue colonne bonus specifiche
                 
-                if bon_u in [s_r, esito_g, esito_uo]:
-                    p['BONUS_S'] += q_riga.get(bon_u, 0)
-                    bonus_centrati_count += 1
-
-                # C. PARTITA +GOL / -GOL
-                if i in p_piu_gol and bon_u == "G" and esito_uo == "OV":
-                    p['SPECIALI'] += (q_riga.get('G', 0) + q_riga.get('OV', 0))
-                    piu_gol_centrata = True
-                if i in p_meno_gol and bon_u == "NG" and esito_uo == "U":
-                    p['SPECIALI'] += (q_riga.get('NG', 0) + q_riga.get('U', 0))
-                    meno_gol_centrata = True
-
-            # D. COPPIA & JOLLY TURNO
-            if piu_gol_centrata and meno_gol_centrata:
-                p['SPECIALI'] *= 2 # Bonus COPPIA
-
-            # Extra Segni & Bonus
-            p['EXTRA'] += {5:5, 6:10, 7:15, 8:25, 9:35, 10:50}.get(segni_centrati_count, 0)
-            p['EXTRA'] += {5:10, 6:20, 7:30, 8:50, 9:70, 10:90}.get(bonus_centrati_count, 0)
-
-            tot_day = sum(p.values())
-            j_turno_perc = estrai_q(row.get('JOLLY_TURNO_PERC', 0))
-            punti_finali = tot_day * (1 + (j_turno_perc/100))
+            # Calcolo finali
+            tot_parziale = sum(dati.values())
+            jolly_turno_perc = estrai_q(row[24]) # Esempio: colonna Y è la 25esima (indice 24)
+            totale_finale = tot_parziale * (1 + (jolly_turno_perc/100))
 
             classifica.append({
-                "Utente": u, "PT TOTALI": round(punti_finali, 2),
-                "R.ESATTO": p['ESATTO'], "SEGNI": p['SEGNI'], "GOL C": p['GOL_C'],
-                "GOL O": p['GOL_O'], "BONUS": p['BONUS_S'], "SPECIALI": p['SPECIALI'],
-                "JOLLY %": j_turno_perc, "EXTRA": p['EXTRA']
+                "Utente": utente, "TOTALE": round(totale_finale, 2),
+                "R.Esatto": dati["ESATTO"], "Segni": dati["SEGNI"], 
+                "Gol Casa": dati["GOL_C"], "Gol Ospite": dati["GOL_O"]
             })
 
-        res_df = pd.DataFrame(classifica).sort_values("PT TOTALI", ascending=False)
-        st.table(res_df)
+        st.table(pd.DataFrame(classifica).sort_values("TOTALE", ascending=False))
 
     except Exception as e:
-        st.error(f"Errore: {e}")
+        st.error(f"Errore nel calcolo: {e}")
 
 calcola()
