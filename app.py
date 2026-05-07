@@ -2,125 +2,133 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="Classifica Pronostici", layout="wide")
-st.title("🏆 Classifica Live Pronostici")
+st.set_page_config(page_title="Classifica Pro Pronostici", layout="wide")
 
-def estrai_valore(cella):
+def estrai_q(cella):
     if pd.isna(cella): return 0.0
-    match = re.search(r"(\d+[\.,]?\d*)", str(cella))
-    if match:
-        return float(match.group(1).replace(',', '.'))
+    m = re.search(r"(\d+[\.,]\d+)", str(cella))
+    if m: return float(m.group(1).replace(',', '.'))
     return 0.0
 
 def calcola():
     try:
-        file_path = "PRONOSTICIINCORSO.xlsx"
+        file = "PRONOSTICIINCORSO.xlsx"
+        df_q = pd.read_excel(file, sheet_name="QUOTE", header=0)
+        df_p = pd.read_excel(file, sheet_name="TUTTOQUI", header=0)
         
-        # Carichiamo tutto: la Riga 1 (viola) è l'header (indice 0)
-        df = pd.read_excel(file_path, sheet_name="TUTTOQUI", header=0)
-        
-        # Pulizia nomi colonne
-        df.columns = [str(c).strip().upper() for c in df.columns]
+        df_q.columns = [str(c).strip().upper() for c in df_q.columns]
+        df_p.columns = [str(c).strip().upper() for c in df_p.columns]
 
-        # RISULTATI REALI: Sono nella Riga 2 dell'Excel (Indice 0 del DataFrame)
-        ris_reali = df.iloc[0]
+        # 1. ANALISI GIORNATA (Risultati Reali in riga 2 di TUTTOQUI)
+        ris_reali_row = df_p.iloc[0]
+        partite_info = {}
+        max_gol, min_gol = -1, 99
+        p_piu_gol, p_meno_gol = [], []
 
-        # UTENTI: Partono dalla RIGA 4 dell'Excel.
-        # In Pandas, avendo usato la riga 1 come header:
-        # Riga 2 dell'Excel = Indice 0
-        # Riga 3 dell'Excel = Indice 1
-        # Riga 4 dell'Excel = Indice 2 (Ecco dove partono gli utenti!)
-        df_utenti = df.iloc[2:].copy()
-        
-        col_nome = 'IL TUO NICK'
-        if col_nome not in df_utenti.columns:
-            st.error(f"Errore: Non trovo '{col_nome}' in A1. Controlla il nome della cella viola.")
-            return
+        for i in range(1, 11):
+            res = str(ris_reali_row.get(f'P{i}_RIS', ""))
+            if "-" in res:
+                gc, go = map(int, res.split('-'))
+                tot = gc + go
+                partite_info[i] = {'gc': gc, 'go': go, 'tot': tot, 'res': res}
+                if tot > max_gol: max_gol = tot
+                if tot < min_gol: min_gol = tot
 
-        # Pulizia: togliamo righe dove il nick è vuoto
-        df_utenti = df_utenti.dropna(subset=[col_nome])
+        for i, info in partite_info.items():
+            if info['tot'] == max_gol: p_piu_gol.append(i)
+            if info['tot'] == min_gol: p_meno_gol.append(i)
 
+        # Partita +Difficile (da colonna G del foglio QUOTE riga 1)
+        p_difficile = int(df_q.iloc[0].get('G', 0))
+
+        # 2. CALCOLO UTENTI (da riga 4)
         classifica = []
+        for _, row in df_p.iloc[2:].iterrows():
+            u = str(row.get('IL TUO NICK', ""))
+            if u == "" or "RISULTATI" in u.upper(): continue
 
-        for _, row in df_utenti.iterrows():
-            nome = row[col_nome]
-            
-            # Saltiamo eventuali righe di intestazione ripetute o vuote
-            if "RISULTATI" in str(nome).upper() or pd.isna(nome):
-                continue
-                
-            punti_totali = 0
-            bonus_presi = 0
+            p = {k: 0.0 for k in ['ESATTO', 'SEGNI', 'GOL_C', 'GOL_O', 'BONUS_S', 'SPECIALI', 'EXTRA']}
+            bonus_centrati_count = 0
+            segni_centrati_count = 0
+            piu_gol_centrata = False
+            meno_gol_centrata = False
 
             for i in range(1, 11):
-                col_ris = f'P{i}_RIS'
-                col_bonus = f'P{i}_BONUS'
-
-                if col_ris not in df.columns: continue
-
-                r_str = str(ris_reali[col_ris])
-                # Se non c'è il trattino nella riga 2, la partita non è finita
-                if "-" not in r_str: continue
-
-                try:
-                    # Analisi Risultato Reale (Riga 2)
-                    g_casa_r, g_ospite_r = map(int, r_str.split('-'))
-                    segno_r = "1" if g_casa_r > g_ospite_r else "2" if g_ospite_r > g_casa_r else "X"
-                    u_ov_r = "U" if (g_casa_r + g_ospite_r) < 2.5 else "OV"
-                    g_ng_r = "G" if (g_casa_r > 0 and g_ospite_r > 0) else "NG"
-
-                    # Pronostico utente (Riga 4+)
-                    prono_u_str = str(row[col_ris])
-                    prono_match = re.search(r'(\d+-\d+)', prono_u_str)
-                    if not prono_match: continue
+                if i not in partite_info: continue
+                info = partite_info[i]
+                q_riga = df_q.iloc[i-1] # Riga corrispondente alla partita
+                
+                # Pronostico Utente
+                prono_u = str(row.get(f'P{i}_RIS', ""))
+                if "-" not in prono_u: continue
+                gc_u, go_u = map(int, re.search(r"(\d+)-(\d+)", prono_u).groups())
+                
+                # Analisi Segni
+                s_r = "1" if info['gc'] > info['go'] else ("2" if info['go'] > info['gc'] else "X")
+                s_u = "1" if gc_u > go_u else ("2" if go_u > gc_u else "X")
+                
+                # A. RISULTATO ESATTO vs GOL CASA/OSPITE
+                if gc_u == info['gc'] and go_u == info['go']:
+                    quota_esatto = q_riga.get(info['res'], 0)
+                    quota_segno = q_riga.get(s_r, 0)
+                    valore = quota_esatto + quota_segno
                     
-                    g_casa_p, g_ospite_p = map(int, prono_match.group(1).split('-'))
-                    segno_p = "1" if g_casa_p > g_ospite_p else "2" if g_ospite_p > g_casa_p else "X"
+                    # Jolly o Difficile?
+                    if str(row.get('JOLLY_PARTITA')) == str(i) or i == p_difficile:
+                        valore *= 2
+                    
+                    p['ESATTO'] += valore
+                    p['SEGNI'] += quota_segno
+                else:
+                    # Se non prende l'esatto, verifichiamo i singoli gol
+                    if s_u == s_r: 
+                        p['SEGNI'] += q_riga.get(s_r, 0)
+                        segni_centrati_count += 1
+                    if gc_u == info['gc']: p['GOL_C'] += q_riga.get(f'GC{gc_u}', 0)
+                    if go_u == info['go']: p['GOL_O'] += q_riga.get(f'GO{go_u}', 0)
 
-                    # 1. Punti Segno (Indovinato 1X2) -> 3 punti fissi
-                    if segno_p == segno_r:
-                        punti_totali += 3.0
+                # B. BONUS SEGNI (TUTTO O NIENTE)
+                # Qui servirebbe una logica per verificare se TUTTI i bonus giocati sono ok
+                # Per ora implementiamo la verifica del singolo bonus colonna
+                bon_u = str(row.get(f'P{i}_BONUS', "")).upper()
+                esito_g = "G" if info['gc']>0 and info['go']>0 else "NG"
+                esito_uo = "OV" if info['tot']>2.5 else "U"
+                
+                if bon_u in [s_r, esito_g, esito_uo]:
+                    p['BONUS_S'] += q_riga.get(bon_u, 0)
+                    bonus_centrati_count += 1
 
-                    # 2. Risultato Esatto (Quota tra parentesi nel pronostico utente)
-                    if g_casa_p == g_casa_r and g_ospite_p == g_ospite_r:
-                        quota_re = estrai_valore(prono_u_str)
-                        # Jolly Partita (raddoppia la quota del risultato esatto)
-                        if 'JOLLY_PARTITA' in row and str(row['JOLLY_PARTITA']) == str(i):
-                            quota_re *= 2
-                        punti_totali += quota_re
+                # C. PARTITA +GOL / -GOL
+                if i in p_piu_gol and bon_u == "G" and esito_uo == "OV":
+                    p['SPECIALI'] += (q_riga.get('G', 0) + q_riga.get('OV', 0))
+                    piu_gol_centrata = True
+                if i in p_meno_gol and bon_u == "NG" and esito_uo == "U":
+                    p['SPECIALI'] += (q_riga.get('NG', 0) + q_riga.get('U', 0))
+                    meno_gol_centrata = True
 
-                    # 3. Bonus Colonna (G/NG, U/O)
-                    if col_bonus in row:
-                        bonus_u = str(row[col_bonus]).upper().strip()
-                        if bonus_u in [segno_r, u_ov_r, g_ng_r]:
-                            bonus_presi += 1
-                except:
-                    continue
+            # D. COPPIA & JOLLY TURNO
+            if piu_gol_centrata and meno_gol_centrata:
+                p['SPECIALI'] *= 2 # Bonus COPPIA
 
-            # Bonus Scala per segni bonus indovinati
-            bonus_scala = {5:5, 6:10, 7:15, 8:25, 9:35, 10:50}.get(bonus_presi, 0)
-            punti_totali += bonus_scala
-            
-            # Jolly Turno % (Es. se l'utente ha 10, aumenta del 10%)
-            j_perc = estrai_valore(row.get('JOLLY_TURNO_PERC', 0)) / 100
-            punti_finali = punti_totali * (1 + j_perc)
+            # Extra Segni & Bonus
+            p['EXTRA'] += {5:5, 6:10, 7:15, 8:25, 9:35, 10:50}.get(segni_centrati_count, 0)
+            p['EXTRA'] += {5:10, 6:20, 7:30, 8:50, 9:70, 10:90}.get(bonus_centrati_count, 0)
+
+            tot_day = sum(p.values())
+            j_turno_perc = estrai_q(row.get('JOLLY_TURNO_PERC', 0))
+            punti_finali = tot_day * (1 + (j_turno_perc/100))
 
             classifica.append({
-                "Utente": nome, 
-                "Punti": round(punti_finali, 2), 
-                "Bonus Indovinati": bonus_presi
+                "Utente": u, "PT TOTALI": round(punti_finali, 2),
+                "R.ESATTO": p['ESATTO'], "SEGNI": p['SEGNI'], "GOL C": p['GOL_C'],
+                "GOL O": p['GOL_O'], "BONUS": p['BONUS_S'], "SPECIALI": p['SPECIALI'],
+                "JOLLY %": j_turno_perc, "EXTRA": p['EXTRA']
             })
 
-        # Mostra la tabella
-        if classifica:
-            res_df = pd.DataFrame(classifica).sort_values(by="Punti", ascending=False)
-            res_df.insert(0, 'Pos', range(1, len(res_df) + 1))
-            st.table(res_df.set_index('Pos'))
-        else:
-            st.info("In attesa di dati validi... Controlla che i giocatori inizino dalla riga 4.")
+        res_df = pd.DataFrame(classifica).sort_values("PT TOTALI", ascending=False)
+        st.table(res_df)
 
     except Exception as e:
-        st.error(f"Errore tecnico: {e}")
+        st.error(f"Errore: {e}")
 
-if __name__ == "__main__":
-    calcola()
+calcola()
